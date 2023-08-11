@@ -48,33 +48,21 @@ if __name__ == '__main__':
     args=parse_input()
     print(args)
     gpus = tf.config.list_physical_devices('GPU')
+    strategy = tf.distribute.MirroredStrategy()
+    num_gpus = len(gpus)
     print('Using gpu', args.gpu)
-    if gpus:
-        try: 
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            tf.config.experimental.set_visible_devices(gpus[args.gpu], 'GPU')
-            logical_gpus = tf.config.experimental.list_logical_devices('GPU')
-            print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPU")
-        except RuntimeError as e:
-# Visible devices must be set before GPUs have been initialized
-            print(e)
-
     results_path=args.output_path
     print("loading Data")
     csv_data_path = args.data_path
     csv_validation_path = args.validation_path
     csv_train_path = args.train_path
-    IMG_DIRECTORY = "/global/cfs/cdirs/als/Bilvin/Train_ALS2"
-    CLASSES = ['Box','FullSphere','FullSpheroid','Icosahedron','Prism3','Prism6','SawtoothRippleBox']
-    RAW_IMG_SIZE = (256, 256)
-    BATCH_SIZE = 256
+    BATCH_SIZE = 64
     X_data_dataframe = pd.read_csv(csv_data_path)
     X_train_dataframe = pd.read_csv(csv_train_path)
     X_validation_dataframe = pd.read_csv(csv_validation_path)
-    X_data = create_dataset_database(X_data_dataframe,IMG_DIRECTORY,RAW_IMG_SIZE,BATCH_SIZE,CLASSES, aug = False)
-    X_train = create_dataset_database(X_train_dataframe,IMG_DIRECTORY,RAW_IMG_SIZE,BATCH_SIZE,CLASSES, aug = False)
-    X_validation = create_dataset_database(X_validation_dataframe,IMG_DIRECTORY,RAW_IMG_SIZE,BATCH_SIZE,CLASSES, aug = False)
+    X_data = create_dataset_tf(X_data_dataframe,strategy,num_gpus,BATCH_SIZE)
+    X_train = create_dataset_tf(X_train_dataframe,strategy,num_gpus,BATCH_SIZE)
+    X_validation = create_dataset_tf(X_validation_dataframe,strategy,num_gpus,BATCH_SIZE)
     print("data loaded")
 
    
@@ -95,12 +83,7 @@ if __name__ == '__main__':
     checkpoint_path=os.path.join(results_path,'{method}_{exp}_{b_s}_{i_s}/'.format(method=args.method,exp=args.experiment_index,b_s=args.batch_size,i_s=args.iterations))
     os.makedirs(checkpoint_path,exist_ok=True)
     
-    model=Sequential()
-    model.add(applications.ResNet50(input_shape=(256,256,3),include_top=False,weights=None, input_tensor=None, pooling=None,classes=7))
-    model.add(Dropout(0.5))
-    model.add(Dense(7,activation="softmax"))
-    
-    ResNet50_model = model
+    ResNet50_model = applications.ResNet50(input_shape=(256,256,3),include_top=True,weights=None, input_tensor=None, pooling=None,classes=7)
     checkpoint_initial_path=args.weights_init_path
     if checkpoint_initial_path is not None:
         model=load_model(checkpoint_initial_path)
@@ -120,25 +103,23 @@ if __name__ == '__main__':
         if args.method == 'Random':
             method = query_random(X_train_dataframe,labeled_idx,batch_size)
         elif args.method == 'LC':
-            method = query_LC(X_train_dataframe,labeled_idx,batch_size,model,IMG_DIRECTORY,RAW_IMG_SIZE,BATCH_SIZE,CLASSES)
+            method = query_LC(X_train_dataframe,labeled_idx,batch_size,model,strategy,num_gpus,BATCH_SIZE)
         elif args.method == 'Entropy':
-            method = query_uncertainityentropy(X_train_dataframe,labeled_idx,batch_size,model,IMG_DIRECTORY,RAW_IMG_SIZE,BATCH_SIZE,CLASSES)
-        elif args.method == 'BALD':
-            method = query_bald(X_train_dataframe,labeled_idx,batch_size)
+            method = query_uncertainityentropy(X_train_dataframe,labeled_idx,batch_size,model,strategy,num_gpus,BATCH_SIZE)
         path='ResNet50_{idx}.hdf5'.format(idx=i+1)
         checkpoint_path_i=checkpoint_path+path
         old_labeled = np.copy(labeled_idx)
         labeled_idx=method
         labeled_dataframe = select_files_by_index(X_train_dataframe, labeled_idx,output_file='Trainlist_{method}_{idx}.csv'.format(method=args.method, idx=i+1))
-        labeled_data = create_dataset_database(labeled_dataframe,IMG_DIRECTORY,RAW_IMG_SIZE,BATCH_SIZE,CLASSES, aug = False)
+        labeled_data = create_dataset_tf(labeled_dataframe,strategy,num_gpus,BATCH_SIZE)
         print(np.shape(labeled_idx))
         labeled_idx_complete.append(labeled_idx)
         new_idx = labeled_idx[np.logical_not(np.isin(labeled_idx, old_labeled))]
         queries.append(new_idx)
         print("New training set shape : ", labeled_dataframe.shape )
         K.clear_session()
-        ResNet50_model = applications.ResNet50(input_shape=(256,256,3),include_top=True,weights=None, input_tensor=None, pooling=None,classes=7)
-        acc, model = evaluate_sample(ResNet50_model,labeled_data, X_validation,X_data, checkpoint_path_i)
+        
+        acc, model = evaluate_sample(labeled_data, X_validation,X_data, checkpoint_path_i)
         
         accuracies.append(acc)
         
